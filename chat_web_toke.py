@@ -276,7 +276,145 @@ def list_tokens():
 # ----------------------- INDEX ---------------------------------------
 @app.route('/')
 def index():
-    return render_template_string("<p>Client code omitted here for brevity. Use previous HTML/JS block.</p>")
+    return render_template_string("""
+    <!doctype html>
+    <html>
+    <head>
+      <meta charset="utf-8" />
+      <title>Chat — Rooms</title>
+      <style>body{font-family:Arial;margin:16px}#chat{border:1px solid #ccc;height:360px;overflow:auto;padding:6px}p{margin:0 0 6px}input{padding:6px}button{padding:6px;margin-left:6px}.user{color:blue;cursor:pointer}</style>
+    </head>
+    <body>
+      <h3>Chat</h3>
+      <div id="menu">
+        <input id="nick" placeholder="nickname" />
+        <button id="enter" disabled>Enter</button>
+        <button id="host">Host Room</button>
+        <input id="joinCode" placeholder="room code" style="width:120px" />
+        <button id="joinBtn">Join</button>
+      </div>
+
+      <div id="chatui" style="display:none;margin-top:10px">
+        <div id="roomInfo"></div>
+        <div id="chat"></div>
+        <div style="margin-top:6px">
+          <input id="msg" placeholder="message" style="width:60%" />
+          <button id="send">Send</button>
+          <button id="recBtn">🎤 Record</button>
+          <input type="file" id="fileInput" />
+          <button id="uploadBtn">Upload</button>
+        </div>
+      </div>
+
+    <script src="//cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.1/socket.io.min.js"></script>
+    <script>
+    const socket = io();
+    let currentRoom = null;
+    function addLine(txt){const p=document.createElement('p');p.innerHTML=txt;document.getElementById('chat').appendChild(p);document.getElementById('chat').scrollTop=document.getElementById('chat').scrollHeight}
+
+    socket.on('connect', ()=>{document.getElementById('enter').disabled=false});
+
+    // Enter / register
+    document.getElementById('enter').onclick = ()=>{ 
+      const nick = document.getElementById('nick').value.trim(); 
+      if(!nick){alert('enter nick');return} 
+      const stored = localStorage.getItem('chatToken'); 
+      const payload = stored ? {name:nick, token:stored, room: currentRoom} : {name:nick, room: currentRoom}; 
+      socket.emit('register', payload);
+    };
+
+    // Host room
+    document.getElementById('host').onclick = async ()=>{ 
+      const nick = document.getElementById('nick').value.trim(); 
+      if(!nick){alert('enter nick to host');return} 
+      const stored = localStorage.getItem('chatToken'); 
+      const token = stored || null; 
+      const name = nick; 
+      const res = await fetch('/create_room', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name:name, token:token})}); 
+      const j = await res.json(); 
+      if(j.error){alert(j.error);return} 
+      document.getElementById('joinCode').value = j.code; 
+      alert('Room created: ' + j.link);
+    };
+
+    // Join by code input
+    document.getElementById('joinBtn').onclick = ()=>{ 
+      const code = document.getElementById('joinCode').value.trim(); 
+      if(!code){alert('enter code');return} 
+      currentRoom = code; 
+      document.getElementById('roomInfo').innerText = 'Room: ' + code; 
+      document.getElementById('chatui').style.display='block';
+    };
+
+    // If page includes ?room=CODE fill the joinCode
+    (function(){const params=new URLSearchParams(location.search);const r=params.get('room');if(r){document.getElementById('joinCode').value=r;currentRoom=r;document.getElementById('roomInfo').innerText='Room: '+r;document.getElementById('chatui').style.display='block'}})();
+
+    socket.on('welcome', data=>{ 
+      localStorage.setItem('chatToken', data.token); 
+      document.getElementById('login')?.remove(); 
+      document.getElementById('chatui').style.display='block'; 
+      addLine('[INFO] You are '+data.name+' (public id: '+data.public_token+')');
+    });
+
+    socket.on('history', lines=>{lines.forEach(l=>addLine(l))}); 
+    socket.on('chat_line', line=>addLine(line));
+
+    // send message (include room)
+    document.getElementById('send').onclick = ()=>{ 
+      const txt = document.getElementById('msg').value.trim(); 
+      if(!txt) return; 
+      socket.emit('msg', {text:txt, room: currentRoom}); 
+      document.getElementById('msg').value='';
+    };
+
+    // upload file
+    document.getElementById('uploadBtn').onclick = ()=>{ 
+      const f = document.getElementById('fileInput').files[0]; 
+      if(!f){alert('choose file');return} 
+      const form = new FormData(); 
+      form.append('file', f); 
+      fetch('/upload', {method:'POST', body: form}).then(r=>r.json()).then(d=>{ 
+        if(d.error){alert(d.error);return} 
+        let ext=d.filename.split('.').pop().toLowerCase(); 
+        let msg; 
+        if(['webm','mp3','wav'].includes(ext)) msg=`<audio controls src="${d.url}"></audio>`; 
+        else if(['png','jpg','jpeg','gif','webp','bmp'].includes(ext)) msg=`<img src="${d.url}" style="max-width:300px;"/>`; 
+        else msg=`<a href="${d.url}" target="_blank">${d.filename}</a>`; 
+        socket.emit('msg', {text:msg, room: currentRoom}); 
+      });
+    };
+
+    // recorder
+    let rec, chunks=[]; 
+    document.getElementById('recBtn').onclick = async ()=>{ 
+      if(!rec || rec.state==='inactive'){ 
+        const stream = await navigator.mediaDevices.getUserMedia({audio:true}); 
+        rec = new MediaRecorder(stream); 
+        rec.ondataavailable = e=>chunks.push(e.data); 
+        rec.onstop = ()=>{ 
+          const blob = new Blob(chunks, {type:'audio/webm'}); 
+          chunks=[]; 
+          const form = new FormData(); 
+          form.append('file', blob, 'voice.webm'); 
+          fetch('/upload',{method:'POST', body: form}).then(r=>r.json()).then(d=>{ 
+            if(!d.error) socket.emit('msg', {text:`<audio controls src="${d.url}"></audio>`, room: currentRoom}); 
+          }); 
+        }; 
+        rec.start(); 
+        document.getElementById('recBtn').innerText='⏹ Stop'; 
+      } else { 
+        rec.stop(); 
+        document.getElementById('recBtn').innerText='🎤 Record'; 
+      } 
+    };
+
+    // click username to see public token
+    document.addEventListener('click', e=>{ if(e.target.classList.contains('user')) alert('Public token: '+e.target.dataset.pub); });
+
+    </script>
+    </body>
+    </html>
+    """)
 
 if __name__ == '__main__':
     init_db()
