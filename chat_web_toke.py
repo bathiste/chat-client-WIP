@@ -445,25 +445,26 @@ def list_tokens():
     cur.execute('SELECT DISTINCT sender_ip, token FROM messages')
     ips = cur.fetchall()
     conn.close()
+
     token_to_ips = {}
     for ip, tok in ips:
         token_to_ips.setdefault(tok, []).append(ip)
-    # render simple HTML table
+
     rows = []
     for name, secret, public in tokens:
         ips_list = token_to_ips.get(secret, [])
         rows.append({'name': name, 'secret': secret, 'public': public, 'ips': ips_list})
+
     html = ['<html><head><title>Tokens</title></head><body><h2>Tokens</h2><pre>']
     for r in rows:
-        html.append(f"USER: {r['name']}
-  IPs: {', '.join(r['ips']) or '-'}
-  public token: {r['public']}
-  secret token: {r['secret']}
-
-")
+        html.append(
+            f"USER: {r['name']}\\n"
+            f"  IPs: {', '.join(r['ips']) or '-'}\\n"
+            f"  public token: {r['public']}\\n"
+            f"  secret token: {r['secret']}\\n\\n"
+        )
     html.append('</pre></body></html>')
-    return '
-'.join(html)
+    return ''.join(html)
 
 
 @app.route('/')
