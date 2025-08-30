@@ -196,7 +196,7 @@ let currentRoom=null;
 function addLine(txt){const p=document.createElement('p');p.innerHTML=txt;document.getElementById('chat').appendChild(p);document.getElementById('chat').scrollTop=document.getElementById('chat').scrollHeight;}
 function updateChatTitle(){document.getElementById('chatTitle').innerText=currentRoom?`Private Chat [${currentRoom}]`:'Public Chat';}
 socket.on('connect',()=>{document.getElementById('enter').disabled=false;});
-document.getElementById('enter').onclick=()=>{const nick=document.getElementById('nick').value.trim();if(!nick){alert('enter nick');return;}const stored=localStorage.getItem('chatToken');if(stored){socket.emit('register',{name:nick,token:stored});}else{socket.emit('register',{name:nick});}};
+document.getElementById('enter').onclick=()=>{const nick=document.getElementById('nick').value.trim();if(!nick){alert('enter nick');return;}const stored=localStorage.getItem('chatToken');if(stored){socket.emit('register',{name:nick,token:stored,room:currentRoom});}else{socket.emit('register',{name:nick,room:currentRoom});}};
 document.getElementById('host').onclick=()=>{const code=Math.random().toString(36).slice(2,8).toUpperCase();currentRoom=code;document.getElementById('joinCode').value=code;document.getElementById('roomInfo').innerText='Room: '+code;document.getElementById('chatui').style.display='block';updateChatTitle();};
 document.getElementById('joinBtn').onclick=()=>{const code=document.getElementById('joinCode').value.trim();if(!code){alert('enter code');return;}currentRoom=code;document.getElementById('roomInfo').innerText='Room: '+code;document.getElementById('chatui').style.display='block';updateChatTitle();};
 socket.on('welcome',data=>{localStorage.setItem('chatToken',data.token);document.getElementById('login')?.remove();document.getElementById('chatui').style.display='block';addLine('[INFO] You are '+data.name+' (public id: '+data.public_token+')');});
@@ -209,8 +209,7 @@ document.getElementById('uploadBtn').onclick=()=>{const f=document.getElementByI
 let rec,chunks=[];
 document.getElementById('recBtn').onclick=async()=>{if(!rec||rec.state==='inactive'){const stream=await navigator.mediaDevices.getUserMedia({audio:true});rec=new MediaRecorder(stream);rec.ondataavailable=e=>chunks.push(e.data);rec.onstop=()=>{const blob=new Blob(chunks,{type:'audio/webm'});chunks=[];const reader=new FileReader();reader.onload=e=>{const msg=`<audio controls src="${e.target.result}"></audio>`;socket.emit('msg',{text:msg,room:currentRoom});};reader.readAsDataURL(blob);};rec.start();document.getElementById('recBtn').innerText='⏹ Stop';}else{rec.stop();document.getElementById('recBtn').innerText='🎤 Record';}};
 </script>
-</body></html>
-"""
+</body></html>"""
 
 @app.route('/')
 def index(): return render_template_string(INDEX_HTML)
@@ -221,7 +220,7 @@ def upload():
     if not f: return jsonify(error="No file uploaded")
     return jsonify(filename=f.filename, url=f"/uploads/{f.filename}")
 
-# ---------------- ADMIN DASHBOARD ----------------
+# ---------------- ADMIN -----------------
 @app.route('/admin')
 def admin_dashboard():
     password = request.args.get('pass')
@@ -232,21 +231,46 @@ def admin_dashboard():
     cur.execute("SELECT sender_ip, ts, content, token, room_code FROM messages ORDER BY ts ASC"); messages = cur.fetchall()
     conn.close()
     html = """<!doctype html>
-<html><head><title>Admin Dashboard</title><style>body{font-family:Arial;margin:20px;}button{padding:6px;margin:6px;}.section{margin-bottom:20px;}.hidden{display:none;}pre{white-space:pre-wrap;}</style></head>
+<html><head><title>Admin Dashboard</title>
+<style>body{font-family:Arial;margin:20px;}button{padding:6px;margin:6px;}.section{margin-bottom:20px;}.hidden{display:none;}pre{white-space:pre-wrap;}</style></head>
 <body>
 <h2>Admin Dashboard</h2>
 <button onclick="showSection('view')">View Users & Rooms</button>
 <button onclick="showSection('manage')">Manage Users</button>
 <button onclick="showSection('logs')">View Messages & Files</button>
+
 <div id="view" class="section hidden">
 <h3>Users</h3><ul>
-{% for name,secret,public in users %}<li><b>{{name}}</b> | Secret: {{secret}} | Public: {{public}}</li>{% endfor %}</ul>
-<h3>Rooms</h3><ul>{% for code,name,host,ts in rooms %}<li><b>{{name}}</b> | Code: {{code}} | Host: {{host}}</li>{% endfor %}</ul>
-<button onclick="hideSection('view')">Back</button></div>
-<div id="manage" class="section hidden"><h3>Manage Users</h3><ul>{% for name,secret,public in users %}<li>{{name}} <button onclick="banUser('{{secret}}')">Ban</button> <button onclick="unbanUser('{{secret}}')">Unban</button></li>{% endfor %}</ul>
-<button onclick="hideSection('manage')">Back</button></div>
-<div id="logs" class="section hidden"><h3>Messages & Files</h3><pre>{% for ip, ts, content, token, room in messages %}[{{datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M')}}] {{ip}} | Room: {{room}} | Token: {{token}}\n{{content}}\n{% endfor %}</pre>
-<button onclick="hideSection('logs')">Back</button></div>
+{% for name,secret,public in users %}
+<li><b>{{name}}</b> | Secret: {{secret}} | Public: {{public}} | IPs: {{get_ips(secret)|join(', ')}}</li>
+{% endfor %}
+</ul>
+<h3>Rooms</h3><ul>
+{% for code,name,host,ts in rooms %}
+<li><b>{{name}}</b> | Code: {{code}} | Host: {{host}}</li>
+{% endfor %}
+</ul>
+<button onclick="hideSection('view')">Back</button>
+</div>
+
+<div id="manage" class="section hidden">
+<h3>Manage Users</h3><ul>
+{% for name,secret,public in users %}
+<li>{{name}} <button onclick="banUser('{{secret}}')">Ban</button> <button onclick="unbanUser('{{secret}}')">Unban</button></li>
+{% endfor %}
+</ul>
+<button onclick="hideSection('manage')">Back</button>
+</div>
+
+<div id="logs" class="section hidden">
+<h3>Messages & Files</h3>
+<pre>{% for ip, ts, content, token, room in messages %}
+[{{datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M')}}] IP: {{ip}} | Room: {{room}} | Token: {{token}}
+{{content}}
+{% endfor %}</pre>
+<button onclick="hideSection('logs')">Back</button>
+</div>
+
 <script>
 function showSection(id){document.getElementById('view').classList.add('hidden');document.getElementById('manage').classList.add('hidden');document.getElementById('logs').classList.add('hidden');document.getElementById(id).classList.remove('hidden');}
 function hideSection(id){document.getElementById(id).classList.add('hidden');}
@@ -254,7 +278,15 @@ function banUser(token){fetch('/admin/ban?pass={{ADMIN_PASSWORD}}&token='+token)
 function unbanUser(token){fetch('/admin/unban?pass={{ADMIN_PASSWORD}}&token='+token).then(r=>alert('Unbanned'));}
 </script>
 </body></html>"""
-    return render_template_string(html, users=users, rooms=rooms, messages=messages, datetime=datetime, ADMIN_PASSWORD=ADMIN_PASSWORD)
+    def get_ips(tok):
+        conn = sqlite3.connect(DB_FILE)
+        cur = conn.cursor()
+        cur.execute("SELECT DISTINCT sender_ip FROM messages WHERE token=?", (tok,))
+        ips = [r[0] for r in cur.fetchall()]
+        conn.close()
+        return ips
+    return render_template_string(html, users=users, rooms=rooms, messages=messages,
+                                  datetime=datetime, ADMIN_PASSWORD=ADMIN_PASSWORD, get_ips=get_ips)
 
 @app.route('/admin/ban')
 def admin_ban():
@@ -270,7 +302,7 @@ def admin_unban():
     conn = sqlite3.connect(DB_FILE); conn.execute("DELETE FROM banned WHERE token=?", (token,)); conn.commit(); conn.close()
     return "ok"
 
-# ---------------- RUN ----------------
+# ---------------- RUN -----------------
 if __name__=='__main__':
     init_db()
     port = int(os.getenv('PORT',5000))
