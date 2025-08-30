@@ -106,10 +106,167 @@ socketio = SocketIO(app, async_mode="eventlet")
 # Map socket‑id (sid) → nickname
 sid_to_name = {}
 
-# ----------------------------------------------------------------------
+# --------------------------------------------------------------
 # HTML page (all in one file)
-# ----------------------------------------------------------------------
-INDEX_HTML = """< ![... same as before …] """   # (omitted for brevity – use the same HTML from the previous answer)
+# --------------------------------------------------------------
+INDEX_HTML = """
+<!doctype html>
+<html>
+<head>
+    <title>Public Chat + Uploads</title>
+    <style>
+        body{font-family:Arial,Helvetica,sans-serif;margin:20px;}
+        #chat{border:1px solid #ccc;height:400px;overflow-y:auto;padding:5px;}
+        #chat p{margin:0;padding:2px;word-break:break-word;}
+        #msg{width:70%;}
+        button:disabled{opacity:0.5;}
+        #uploadSection{margin-top:10px;}
+    </style>
+</head>
+<body>
+    <h2>Public Chat</h2>
+
+    <div id="login">
+        <input id="nick" placeholder="choose a nickname" autocomplete="off"/>
+        <button id="enter" disabled>Enter Chat</button>
+    </div>
+
+    <div id="chatui" style="display:none;">
+        <div id="chat"></div>
+
+        <input id="msg" autocomplete="off" placeholder="type a message"/>
+        <button id="send">Send</button>
+
+        <!-- ----------- upload UI ----------- -->
+        <div id="uploadSection">
+            <input type="file" id="fileInput"/>
+            <button id="uploadBtn">Upload</button>
+        </div>
+    </div>
+
+<script src="//cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.1/socket.io.min.js"></script>
+<script>
+    const socket = io();
+
+    // ------------------------------------------------------------------
+    // Helper: put a line into the chat window.
+    // We use `innerHTML` so that an <img> tag (or a link) renders.
+    // ------------------------------------------------------------------
+    function addLine(txt){
+        const p = document.createElement('p');
+        p.innerHTML = txt;          // <-- renders HTML safely (but still raw)
+        document.getElementById('chat').appendChild(p);
+        document.getElementById('chat').scrollTop =
+            document.getElementById('chat').scrollHeight;
+    }
+
+    // ------------------------------------------------------------------
+    // Enable the “Enter Chat” button only after the socket is ready
+    // ------------------------------------------------------------------
+    socket.on('connect', ()=>{
+        console.log('[socket] connected');
+        document.getElementById('enter').disabled = false;
+    });
+
+    // ------------------------------------------------------------------
+    // Register (nickname + optional token)
+    // ------------------------------------------------------------------
+    document.getElementById('enter').onclick = function(){
+        const nick = document.getElementById('nick').value.trim();
+        if(!nick){ alert('Please type a nickname'); return; }
+        const storedToken = localStorage.getItem('chatToken');   // may be null
+        if(storedToken){
+            socket.emit('register', {name:nick, token:storedToken});
+        }else{
+            socket.emit('register', {name:nick});
+        }
+    };
+
+    // ------------------------------------------------------------------
+    // Server says “welcome” → we store the token and show the UI
+    // ------------------------------------------------------------------
+    socket.on('welcome', data=>{
+        console.log('[socket] welcome', data);
+        localStorage.setItem('chatToken', data.token);
+        document.getElementById('login').style.display = 'none';
+        document.getElementById('chatui').style.display = 'block';
+        addLine("[INFO] You are known as " + data.name);
+    });
+
+    // ------------------------------------------------------------------
+    // Recent history (array of pre‑formatted lines)
+    // ------------------------------------------------------------------
+    socket.on('history', lines=>{
+        lines.forEach(l=>addLine(l));
+    });
+
+    // ------------------------------------------------------------------
+    // New chat line from anyone (including yourself)
+    // ------------------------------------------------------------------
+    socket.on('chat_line', line=>addLine(line));
+
+    // ------------------------------------------------------------------
+    // Send a text message
+    // ------------------------------------------------------------------
+    document.getElementById('send').onclick = function(){
+        const txt = document.getElementById('msg').value.trim();
+        if(!txt){return;}
+        socket.emit('msg', txt);
+        document.getElementById('msg').value = '';
+    };
+    document.getElementById('msg').addEventListener('keypress', e=>{
+        if(e.key === 'Enter'){
+            e.preventDefault();
+            document.getElementById('send').click();
+        }
+    });
+
+    // ------------------------------------------------------------------
+    // ----------- FILE UPLOAD ----------
+    // ------------------------------------------------------------------
+    document.getElementById('uploadBtn').onclick = function(){
+        const fileInput = document.getElementById('fileInput');
+        if (!fileInput.files.length){
+            alert('Select a file first');
+            return;
+        }
+        const file = fileInput.files[0];
+        const form = new FormData();
+        form.append('file', file);
+
+        fetch('/upload', {
+            method: 'POST',
+            body: form
+        })
+        .then(resp => resp.json())
+        .then(data => {
+            if (data.error){
+                alert('Upload error: ' + data.error);
+                return;
+            }
+            // data.url is the public URL of the uploaded file
+            // If it is an image we embed it, otherwise we link to it.
+            const ext = data.filename.split('.').pop().toLowerCase();
+            const imageExts = ['png','jpg','jpeg','gif','webp','bmp'];
+            let msg;
+            if (imageExts.includes(ext)){
+                msg = `<img src="${data.url}" style="max-width:300px;"/>`;
+            }else{
+                msg = `<a href="${data.url}" target="_blank">`+
+                      `${data.filename}</a>`;
+            }
+            // Broadcast the message as a **regular chat line** so everybody sees it.
+            socket.emit('msg', msg);
+        })
+        .catch(err => {
+            console.error('Upload failed', err);
+            alert('Upload failed');
+        });
+    };
+</script>
+</body>
+</html>
+"""
 
 # ----------------------------------------------------------------------
 # Socket.IO events
