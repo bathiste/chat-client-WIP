@@ -1,43 +1,16 @@
 #!/usr/bin/env python3
-"""
-Full chat server with:
- - reliable public IP capture (X-Forwarded-For)
- - secret + public tokens
- - voice messages and file uploads
- - private rooms with host/invite links and Host button
- - admin page /tokens (HTML) listing USER, IPs, public token, secret
- - IPs never shown in chat/history, only logged and visible in /tokens
-"""
-
-import os, uuid, sqlite3, time
+import os, uuid, sqlite3, time, random, string, base64
 from datetime import datetime
-from pathlib import Path
-
-from flask import (
-    Flask,
-    render_template_string,
-    request,
-    jsonify,
-    send_from_directory,
-    abort,
-    redirect,
-    url_for,
-)
-from flask_socketio import SocketIO, emit, join_room as sio_join, leave_room as sio_leave
+from flask import Flask, render_template_string, request, jsonify, abort
+from flask_socketio import SocketIO, emit, join_room as sio_join
 from werkzeug.utils import secure_filename
 
-# ----------------------- CONFIG ---------------------------------------
+# ---------------- CONFIG ----------------
 DB_FILE = "chat_web_token.db"
-UPLOAD_FOLDER = Path("uploads")
-UPLOAD_FOLDER.mkdir(parents=True, exist_ok=True)
-
 MAX_CONTENT_LENGTH = 20 * 1024 * 1024
-ALLOWED_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".webm", ".mp3", ".wav"}
 ADMIN_PASSWORD = os.getenv("CHAT_ADMIN_PASS", "changeme")
-BASE_URL = os.getenv("BASE_URL", "")
 
-# ----------------------- DB HELPERS ----------------------------------
-
+# ---------------- DB HELPERS ----------------
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
@@ -63,40 +36,29 @@ def init_db():
     conn.commit()
     conn.close()
 
-
-def store_message(sender_ip: str, content: str, token: str = None, room_code: str = None):
+def store_message(sender_ip, content, token=None, room_code=None):
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO messages (sender_ip, ts, content, token, room_code) VALUES (?,?,?,?,?)",
-        (sender_ip, time.time(), content, token, room_code),
-    )
+    cur.execute("INSERT INTO messages (sender_ip, ts, content, token, room_code) VALUES (?,?,?,?,?)",
+                (sender_ip, time.time(), content, token, room_code))
     conn.commit()
     conn.close()
 
-
-def recent_messages(limit: int = 50, room_code: str = None):
+def recent_messages(limit=50, room_code=None):
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
     if room_code:
-        cur.execute(
-            "SELECT sender_ip, ts, content, token FROM messages WHERE room_code=? ORDER BY ts DESC LIMIT ?",
-            (room_code, limit),
-        )
+        cur.execute("SELECT sender_ip, ts, content, token FROM messages WHERE room_code=? ORDER BY ts DESC LIMIT ?",
+                    (room_code, limit))
     else:
-        cur.execute(
-            "SELECT sender_ip, ts, content, token FROM messages ORDER BY ts DESC LIMIT ?",
-            (limit,),
-        )
+        cur.execute("SELECT sender_ip, ts, content, token FROM messages ORDER BY ts DESC LIMIT ?", (limit,))
     rows = cur.fetchall()
     conn.close()
     rows.reverse()
     return rows
 
-
-def get_name_by_token(token: str):
-    if not token:
-        return None
+def get_name_by_token(token):
+    if not token: return None
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
     cur.execute("SELECT name FROM tokens WHERE token=?", (token,))
@@ -104,28 +66,22 @@ def get_name_by_token(token: str):
     conn.close()
     return row[0] if row else None
 
-
-def set_token_name(token: str, name: str):
+def set_token_name(token, name):
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
     cur.execute("SELECT public_token FROM tokens WHERE token=?", (token,))
     row = cur.fetchone()
     if row:
-        public_token = row[0]
         cur.execute("UPDATE tokens SET name=? WHERE token=?", (name, token))
     else:
         public_token = str(uuid.uuid4())[:8]
-        cur.execute(
-            "INSERT OR REPLACE INTO tokens (token, name, public_token) VALUES (?,?,?)",
-            (token, name, public_token),
-        )
+        cur.execute("INSERT OR REPLACE INTO tokens (token, name, public_token) VALUES (?,?,?)",
+                    (token, name, public_token))
     conn.commit()
     conn.close()
 
-
-def get_public_token_by_token(token: str):
-    if not token:
-        return None
+def get_public_token_by_token(token):
+    if not token: return None
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
     cur.execute("SELECT public_token FROM tokens WHERE token=?", (token,))
@@ -133,28 +89,15 @@ def get_public_token_by_token(token: str):
     conn.close()
     return row[0] if row else None
 
-
-def get_public_token(name: str):
+def create_room_in_db(code, name, host_token):
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
-    cur.execute("SELECT public_token FROM tokens WHERE name=?", (name,))
-    row = cur.fetchone()
-    conn.close()
-    return row[0] if row else None
-
-
-def create_room_in_db(code: str, name: str, host_token: str):
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO rooms (code, name, host_token, created_ts) VALUES (?,?,?,?)",
-        (code, name, host_token, time.time()),
-    )
+    cur.execute("INSERT INTO rooms (code, name, host_token, created_ts) VALUES (?,?,?,?)",
+                (code, name, host_token, time.time()))
     conn.commit()
     conn.close()
 
-
-def room_exists(code: str):
+def room_exists(code):
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
     cur.execute("SELECT code FROM rooms WHERE code=?", (code,))
@@ -162,41 +105,35 @@ def room_exists(code: str):
     conn.close()
     return bool(row)
 
+def generate_room_code(length=6):
+    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
 
-# ----------------------- APP SETUP -----------------------------------
+# ---------------- APP SETUP ----------------
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.urandom(24)
 app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH
 socketio = SocketIO(app, async_mode="eventlet")
 
-# map sid -> name, token, room
 sid_to_name = {}
 sid_to_token = {}
 sid_to_room = {}
 
-# ----------------------- UTIL ----------------------------------------
 def get_client_ip():
     xff = request.headers.get("X-Forwarded-For") or request.headers.get("X-Real-IP")
     if xff:
         return xff.split(',')[0].strip()
     return request.remote_addr
 
-# ----------------------- SOCKET.IO HANDLERS --------------------------
+# ---------------- SOCKET.IO ----------------
 @socketio.on('register')
 def ws_register(data):
     name_requested = (data.get('name') or '').strip()
     provided_token = data.get('token')
-    desired_room = data.get('room') or data.get('room_code') or None
+    desired_room = data.get('room') or None
 
-    if provided_token:
-        stored_name = get_name_by_token(provided_token)
-        if stored_name:
-            name = stored_name
-            token = provided_token
-        else:
-            name = name_requested or "anon"
-            token = str(uuid.uuid4())
-            set_token_name(token, name)
+    if provided_token and get_name_by_token(provided_token):
+        name = get_name_by_token(provided_token)
+        token = provided_token
     else:
         name = name_requested or "anon"
         token = str(uuid.uuid4())
@@ -215,14 +152,11 @@ def ws_register(data):
     recent = recent_messages(limit=50, room_code=sid_to_room.get(request.sid))
     lines = []
     for sender_ip, ts, txt, tok in recent:
-        nickname = get_name_by_token(tok)
-        if not nickname:
-            nickname = "anon"
+        nickname = get_name_by_token(tok) or "anon"
         pub = get_public_token_by_token(tok) or "?"
         when = datetime.fromtimestamp(ts).strftime('%H:%M')
         lines.append(f"<span class='user' data-pub='{pub}'>{nickname}</span> - {when} - {txt}")
     emit('history', lines)
-
 
 @socketio.on('msg')
 def ws_msg(data):
@@ -242,56 +176,58 @@ def ws_msg(data):
     else:
         emit('chat_line', line, broadcast=True)
 
-# ----------------------- ADMIN TOKENS --------------------------------
-@app.route('/tokens')
-def list_tokens():
-    password = request.args.get('pass')
-    if password != ADMIN_PASSWORD:
-        abort(403)
-    conn = sqlite3.connect(DB_FILE)
-    cur = conn.cursor()
-    cur.execute('SELECT name, token, public_token FROM tokens')
-    tokens = cur.fetchall()
-    cur.execute('SELECT DISTINCT sender_ip, token FROM messages')
-    ips = cur.fetchall()
-    conn.close()
-    token_to_ips = {}
-    for ip, tok in ips:
-        token_to_ips.setdefault(tok, []).append(ip)
-    rows = []
-    for name, secret, public in tokens:
-        ips_list = token_to_ips.get(secret, [])
-        rows.append({'name': name, 'secret': secret, 'public': public, 'ips': ips_list})
-    html = ['<html><head><title>Tokens</title></head><body><h2>Tokens</h2><pre>']
-    for r in rows:
-        html.append(
-            f"USER: {r['name']}\n"
-            f"  IPs: {', '.join(r['ips']) or '-'}\n"
-            f"  public token: {r['public']}\n"
-            f"  secret token: {r['secret']}\n\n"
-        )
-    html.append('</pre></body></html>')
-    return ''.join(html)
+# ---------------- CREATE ROOM ----------------
+@app.route('/create_room', methods=['POST'])
+def create_room():
+    data = request.json
+    name = (data.get('name') or '').strip() or "anon"
+    token = data.get('token') or str(uuid.uuid4())
+    room_code = generate_room_code()
+    create_room_in_db(room_code, name, token)
+    return jsonify(code=room_code, link=f"/?room={room_code}")
 
-# ----------------------- INDEX ---------------------------------------
+# ---------------- UPLOAD HANDLER ----------------
+@app.route('/upload', methods=['POST'])
+def upload():
+    f = request.files.get('file')
+    if not f:
+        return jsonify(error="No file uploaded")
+    content = f.read()
+    ext = os.path.splitext(f.filename)[1].lower()
+    if ext in ['.png','.jpg','.jpeg','.gif','.bmp','.webp']:
+        b64 = base64.b64encode(content).decode()
+        url = f"data:image/{ext[1:]};base64,{b64}"
+    elif ext in ['.webm','.mp3','.wav']:
+        b64 = base64.b64encode(content).decode()
+        url = f"data:audio/{ext[1:]};base64,{b64}"
+    else:
+        return jsonify(error="Unsupported file type")
+    return jsonify(filename=f.filename, url=url)
+
+# ---------------- INDEX HTML ----------------
 INDEX_HTML = """
 <!doctype html>
 <html>
 <head>
-  <title>Chat with Voice</title>
+  <title>Chat with Voice & Rooms</title>
   <style>
     body{font-family:Arial;margin:20px;}
     #chat{border:1px solid #ccc;height:400px;overflow-y:auto;padding:5px;}
     #chat p{margin:0;padding:2px;word-break:break-word;}
     #msg{width:70%;}
     .user{color:blue;cursor:pointer;}
+    #menu{margin-bottom:10px;}
+    #joinCode{width:120px;}
   </style>
 </head>
 <body>
 <h2>Public Chat</h2>
-<div id="login">
+<div id="menu">
   <input id="nick" placeholder="nickname"/>
   <button id="enter" disabled>Enter</button>
+  <button id="host">Host Room</button>
+  <input id="joinCode" placeholder="room code"/>
+  <button id="joinBtn">Join</button>
 </div>
 <div id="chatui" style="display:none;">
   <div id="chat"></div>
@@ -306,37 +242,59 @@ INDEX_HTML = """
 <script src="//cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.1/socket.io.min.js"></script>
 <script>
 const socket = io();
+let currentRoom = null;
+
 function addLine(txt){
   const p=document.createElement('p');
   p.innerHTML=txt;
   document.getElementById('chat').appendChild(p);
   document.getElementById('chat').scrollTop=document.getElementById('chat').scrollHeight;
 }
+
 socket.on('connect',()=>{document.getElementById('enter').disabled=false;});
 document.getElementById('enter').onclick=()=>{
   const nick=document.getElementById('nick').value.trim();
   if(!nick){alert('enter nick');return;}
   const stored=localStorage.getItem('chatToken');
-  if(stored){socket.emit('register',{name:nick,token:stored});}
-  else{socket.emit('register',{name:nick});}
+  socket.emit('register',{name:nick, token:stored, room:currentRoom});
 };
+
+document.getElementById('host').onclick=async()=>{
+  const nick=document.getElementById('nick').value.trim();
+  if(!nick){alert('enter nick');return;}
+  const token = localStorage.getItem('chatToken') || null;
+  const res = await fetch('/create_room',{method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:nick,token:token})});
+  const j = await res.json();
+  currentRoom=j.code;
+  document.getElementById('joinCode').value=j.code;
+  alert('Room created: '+j.link);
+};
+
+document.getElementById('joinBtn').onclick=()=>{
+  const code = document.getElementById('joinCode').value.trim();
+  if(!code){alert('enter code');return;}
+  currentRoom=code;
+  document.getElementById('chatui').style.display='block';
+};
+
 socket.on('welcome',data=>{
   localStorage.setItem('chatToken',data.token);
-  document.getElementById('login').style.display='none';
   document.getElementById('chatui').style.display='block';
   addLine(`[INFO] You are ${data.name} (public id: ${data.public_token})`);
 });
+
 socket.on('history',lines=>{lines.forEach(l=>addLine(l));});
 socket.on('chat_line',line=>addLine(line));
+
 document.getElementById('send').onclick=()=>{
   const txt=document.getElementById('msg').value.trim();
   if(!txt)return;
-  socket.emit('msg',txt);
+  socket.emit('msg',{text:txt, room:currentRoom});
   document.getElementById('msg').value='';
 };
 document.getElementById('msg').addEventListener('keypress',e=>{if(e.key==='Enter'){document.getElementById('send').click();}});
 
-// click username to see public token
+// click username
 document.addEventListener('click',e=>{if(e.target.classList.contains('user')){alert('Public token: '+e.target.dataset.pub);}});
 
 // upload file
@@ -346,13 +304,7 @@ document.getElementById('uploadBtn').onclick=()=>{
   const form=new FormData();form.append('file',f);
   fetch('/upload',{method:'POST',body:form}).then(r=>r.json()).then(d=>{
     if(d.error){alert(d.error);return;}
-    const ext=d.filename.split('.').pop().toLowerCase();
-    const audioExt=['webm','mp3','wav'];
-    let msg;
-    if(audioExt.includes(ext)) msg=`<audio controls src="${d.url}"></audio>`;
-    else if(['png','jpg','jpeg','gif','webp','bmp'].includes(ext)) msg=`<img src="${d.url}" style="max-width:300px;"/>`;
-    else msg=`<a href="${d.url}" target="_blank">${d.filename}</a>`;
-    socket.emit('msg',msg);
+    socket.emit('msg',{text:`<a>${d.filename}</a><br><img src="${d.url}"/>`, room:currentRoom});
   });
 };
 
@@ -360,22 +312,19 @@ document.getElementById('uploadBtn').onclick=()=>{
 let rec,chunks=[];
 document.getElementById('recBtn').onclick=async()=>{
   if(!rec||rec.state==='inactive'){
-    let stream=await navigator.mediaDevices.getUserMedia({audio:true});
+    const stream=await navigator.mediaDevices.getUserMedia({audio:true});
     rec=new MediaRecorder(stream);
     rec.ondataavailable=e=>chunks.push(e.data);
-    rec.onstop=()=>{
+    rec.onstop=async()=>{
       const blob=new Blob(chunks,{type:'audio/webm'});chunks=[];
       const form=new FormData();form.append('file',blob,'voice.webm');
-      fetch('/upload',{method:'POST',body:form}).then(r=>r.json()).then(d=>{
-        if(!d.error){socket.emit('msg',`<audio controls src="${d.url}"></audio>`);}
-      });
+      const res = await fetch('/upload',{method:'POST',body:form});
+      const d = await res.json();
+      if(!d.error){socket.emit('msg',{text:`<audio controls src="${d.url}"></audio>`, room:currentRoom});}
     };
     rec.start();
     document.getElementById('recBtn').innerText='⏹ Stop';
-  } else {
-    rec.stop();
-    document.getElementById('recBtn').innerText='🎤 Record';
-  }
+  } else { rec.stop(); document.getElementById('recBtn').innerText='🎤 Record'; }
 };
 </script>
 </body>
@@ -386,16 +335,6 @@ document.getElementById('recBtn').onclick=async()=>{
 def index():
     return render_template_string(INDEX_HTML)
 
-# Optional: dummy upload endpoint so your file uploads work
-@app.route('/upload', methods=['POST'])
-def upload():
-    f = request.files.get('file')
-    if not f:
-        return jsonify(error="No file uploaded")
-    # For testing, we just return a dummy URL
-    return jsonify(filename=f.filename, url=f"/uploads/{f.filename}")
-
 if __name__ == '__main__':
     init_db()
-    port = int(os.getenv('PORT', 5000))
-    socketio.run(app, host='0.0.0.0', port=port)
+    socketio.run(app, host='0.0.0.0', port=int(os.getenv('PORT',5000)))
